@@ -76,9 +76,9 @@ client.on('message', async (msg) => {
         if (verbose) { console.log(); }
         console.log('Done!');
 
-        await fs.writeFileSync(`../output/${fileName}.${fileType}`, data.toString('binary'), { encoding: 'binary' });
+        await fs.writeFileSync(`output/${fileName}.${fileType}`, data.toString('binary'), { encoding: 'binary' });
         import('open').then(async (open) => {
-            await open.default(`../output/${fileName}.${fileType}`);
+            await open.default(`output/${fileName}.${fileType}`);
         });
 
         console.log();
