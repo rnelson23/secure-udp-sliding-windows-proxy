@@ -4,6 +4,7 @@ const fs = require('fs');
 const client = dgram.createSocket('udp4');
 
 const host = '45.47.73.5';
+// const host = 'localhost';
 const port = 3000;
 
 let link = 'https://example.com';
@@ -45,9 +46,12 @@ let last = 0;
 let timeout;
 let drop = new Set();
 let key;
+let start;
+let end;
 
 client.on('message', async (msg) => {
     if (!active) {
+        start = Date.now();
         let len = msg.readInt32BE();
         key = msg.readBigInt64BE(4);
         active = true;
@@ -58,7 +62,7 @@ client.on('message', async (msg) => {
             }
         }
 
-        console.log(`Dropping ${drop.size} packets`);
+        if (drop.size > 0) { console.log(`Dropping ${drop.size} packets`); }
         console.log(`Receiving ${len} packets...`);
 
         return;
@@ -70,10 +74,17 @@ client.on('message', async (msg) => {
     clearTimeout(timeout);
 
     if (seqNum === -1) {
+        end = Date.now();
+
         const fileName = link.substring(link.lastIndexOf('/') + 1).match(/[^.]+/)[0];
         const fileType = msg.subarray(4).toString('binary');
 
+        const size = (data.length * 8) / 1000000;
+        const time = (end - start) / 1000;
+        const throughput = Math.round((size / time) * 100) / 100;
+
         if (verbose) { console.log(); }
+        console.log(`Received at ${throughput} Mbps`);
         console.log('Done!');
 
         await fs.writeFileSync(`output/${fileName}.${fileType}`, data.toString('binary'), { encoding: 'binary' });
