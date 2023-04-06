@@ -139,5 +139,7 @@ client.on('message', async (msg) => {
             }
         });
 
+        if (verbose) { console.log(`   Timeout packet ${last + 1}`); }
+
     }, 50);
 });
