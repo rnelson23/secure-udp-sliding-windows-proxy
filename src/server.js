@@ -12,8 +12,6 @@ let window = 0;
 let last = 0;
 let fileType;
 
-const token = 'Nzk4NzM4MjAzMzM4NDczNDky.GOg-AV.iWw07kzUW5R5t6nls9OdvkbR1wp5zZf60HOnMQ';
-
 server.on('message', async (msg, rinfo) => {
     let ack = msg.readInt32BE();
 
