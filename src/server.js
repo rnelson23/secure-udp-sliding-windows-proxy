@@ -1,42 +1,38 @@
 const dgram = require('dgram');
-const axios = require("axios");
+const axios = require('axios');
 
 const server = dgram.createSocket('udp4');
-
 const port = 3000;
 
-let key = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-let active = false;
+let windowSize = 0;
+let lastSent = null;
 let packets = [];
-let window = 0;
-let last = 0;
 let fileType;
+let timeout;
 
 server.on('message', async (msg, rinfo) => {
     let ack = msg.readInt32BE();
+    clearTimeout(timeout);
 
-    if (!active) {
-        const url = msg.subarray(12).toString();
-        window = msg.readInt32BE();
-        key = key ^ Number(msg.readBigInt64BE(4));
-
+    if (lastSent === null) {
         console.log('\nReceived request');
-
-        let file = await axios
+        
+        const url = msg.subarray(4).toString();
+        windowSize = ack;
+        
+        const file = await axios
             .get(url, { responseType: 'arraybuffer', responseEncoding: 'binary' })
             .then((res) => {
                 console.log(`Cached ${res.data.length} bytes`);
+                
                 fileType = res.headers['content-type'].split('/')[1];
                 return Buffer.from(res.data, 0, 2);
             });
 
         for (let i = 0; i < Math.ceil(file.length / 512); i++) {
-            const data = file.subarray(i * 512, (i * 512) + 512).toString('binary');
-            const packet = Buffer.alloc(data.length + 4, 0, 'binary');
-
-            for (let j = 0; j < key.length; j++) {
-                data[j] = data.charCodeAt(j) ^ key.charCodeAt(j);
-            }
+            const offset = i * 512;
+            const data = file.subarray(offset, offset + 512).toString('binary');
+            const packet = Buffer.alloc(4 + data.length, 0, 'binary');
 
             packet.writeInt32BE(i + 1);
             packet.write(data, 4, 'binary');
@@ -46,51 +42,56 @@ server.on('message', async (msg, rinfo) => {
 
         console.log(`Sending ${packets.length} packets...`);
 
-        const header = Buffer.alloc(12);
+        const header = Buffer.alloc(4);
         header.writeInt32BE(packets.length);
-        header.writeBigInt64BE(BigInt(key), 4);
 
         server.send(header, rinfo.port, rinfo.address, (err) => {
-            if (err) { console.log(err); }
+            if (err) { console.error(err); }
         });
 
-        active = true;
+        lastSent = 0;
         ack = 0;
     }
 
-    if (ack < last) { last = ack; }
-
+    if (ack < lastSent) { lastSent = ack; }
+    
     if (ack === packets.length) {
-        let packet = Buffer.alloc(4, 0, 'binary');
+        let packet = Buffer.alloc(4);
+        
         packet.writeInt32BE(-1);
-        packet = Buffer.concat([packet, Buffer.from(fileType.match(/\w+/)[0], 'binary')]);
-
-        active = false;
-        packets = [];
-        window = 0;
-        last = 0;
+        packet.write(fileType.match(/\w+/)[0], 4);
 
         server.send(packet, rinfo.port, rinfo.address, (err) => {
-            if (err) {
-                console.log(err);
-            }
+            if (err) { console.error(err); }
         });
+
+        packets = [];
+        windowSize = 0;
+        lastSent = null;
 
         console.log('Done!');
         return;
     }
 
-    for (let i = 0; i < window; i++) {
-        if (last + i >= packets.length) { break; }
+    for (let i = 0; i < windowSize; i++) {
+        const seqNum = lastSent + i;
+        if (seqNum >= packets.length) { break; }
 
-        server.send(packets[last + i], rinfo.port, rinfo.address, (err) => {
-            if (err) {
-                console.log(err);
-            }
+        server.send(packets[seqNum], rinfo.port, rinfo.address, (err) => {
+            if (err) { console.error(err); }
         });
     }
 
-    last += window;
+    lastSent += windowSize;
+
+    timeout = setTimeout(() => {
+        packets = [];
+        windowSize = 0;
+        lastSent = null;
+
+        console.log('Aborted!');
+
+    }, 10000);
 });
 
 server.bind(port, () => {
