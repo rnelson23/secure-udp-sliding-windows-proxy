@@ -1,97 +1,107 @@
 const dgram = require('dgram');
+const crypto = require('crypto');
 const axios = require('axios');
 
 const server = dgram.createSocket('udp4');
 const port = 3000;
 
-let windowSize = 0;
+let key = Buffer.alloc(4);
 let lastSent = null;
 let packets = [];
+let windowSize;
 let fileType;
 let timeout;
 
 server.on('message', async (msg, rinfo) => {
-    let ack = msg.readInt32BE();
     clearTimeout(timeout);
+
+    let ack = msg.readInt32BE();
+    if (ack < lastSent) { lastSent = ack; }
 
     if (lastSent === null) {
         console.log('\nReceived request');
-        
-        const url = msg.subarray(4).toString();
+
+        const prime = msg.readInt32BE(4);
+        const generator = msg.readInt32BE(8);
+        const secret = crypto.randomInt(3, 32);
+
+        key.writeInt32BE(msg.readInt32BE(12) ** secret % prime);
         windowSize = ack;
-        
+        lastSent = 0;
+        ack = 0;
+
         const file = await axios
-            .get(url, { responseType: 'arraybuffer', responseEncoding: 'binary' })
+            .get(msg.subarray(16).toString(), { responseType: 'arraybuffer' })
             .then((res) => {
                 console.log(`Cached ${res.data.length} bytes`);
-                
-                fileType = res.headers['content-type'].split('/')[1];
-                return Buffer.from(res.data, 0, 2);
+
+                fileType = res.headers['content-type'].split('/')[1].match(/\w+/)[0];
+                return Buffer.from(res.data);
             });
 
-        for (let i = 0; i < Math.ceil(file.length / 512); i++) {
-            const offset = i * 512;
-            const data = file.subarray(offset, offset + 512).toString('binary');
-            const packet = Buffer.alloc(4 + data.length, 0, 'binary');
+        const packetSize = 512;
+        const numPackets = Math.ceil(file.length / packetSize);
+
+        for (let i = 0; i < numPackets; i++) {
+            const data = file.subarray(i * packetSize, i * packetSize + packetSize);
+            const packet = Buffer.alloc(4 + data.length);
+
+            for (let j = 0; j < data.length; j++) {
+                packet[j + 4] = data[j] ^ key[j % key.length];
+            }
 
             packet.writeInt32BE(i + 1);
-            packet.write(data, 4, 'binary');
-
             packets.push(packet);
         }
 
-        console.log(`Sending ${packets.length} packets...`);
+        const header = Buffer.alloc(12);
 
-        const header = Buffer.alloc(4);
-        header.writeInt32BE(packets.length);
+        header.writeInt32BE(generator ** secret % prime,
+            header.writeInt32BE(numPackets));
 
         server.send(header, rinfo.port, rinfo.address, (err) => {
             if (err) { console.error(err); }
+            console.log(`Sending ${numPackets} packets...`);
         });
-
-        lastSent = 0;
-        ack = 0;
     }
 
-    if (ack < lastSent) { lastSent = ack; }
-    
+    if (ack < packets.length) {
+        for (let i = 0; i < windowSize; i++) {
+            const seqNum = lastSent + i;
+            if (seqNum >= packets.length) { break; }
+
+            server.send(packets[seqNum], rinfo.port, rinfo.address, (err) => {
+                if (err) { console.error(err); }
+            });
+        }
+
+        lastSent += windowSize;
+
+        timeout = setTimeout(() => {
+            console.log('Aborted!');
+
+            key = Buffer.alloc(4);
+            lastSent = null;
+            packets = [];
+
+        }, 10000);
+    }
+
     if (ack === packets.length) {
-        let packet = Buffer.alloc(4);
-        
+        let packet = Buffer.alloc(4 + fileType.length);
+
         packet.writeInt32BE(-1);
-        packet.write(fileType.match(/\w+/)[0], 4);
+        packet.write(fileType, 4);
+
+        key = Buffer.alloc(4);
+        lastSent = null;
+        packets = [];
 
         server.send(packet, rinfo.port, rinfo.address, (err) => {
             if (err) { console.error(err); }
-        });
-
-        packets = [];
-        windowSize = 0;
-        lastSent = null;
-
-        console.log('Done!');
-        return;
-    }
-
-    for (let i = 0; i < windowSize; i++) {
-        const seqNum = lastSent + i;
-        if (seqNum >= packets.length) { break; }
-
-        server.send(packets[seqNum], rinfo.port, rinfo.address, (err) => {
-            if (err) { console.error(err); }
+            console.log('Done!');
         });
     }
-
-    lastSent += windowSize;
-
-    timeout = setTimeout(() => {
-        packets = [];
-        windowSize = 0;
-        lastSent = null;
-
-        console.log('Aborted!');
-
-    }, 10000);
 });
 
 server.bind(port, () => {
