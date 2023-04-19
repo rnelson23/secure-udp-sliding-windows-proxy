@@ -23,14 +23,14 @@ let phi = prime - 1;
 let generator;
 
 for (let num = 2; num * num <= phi; num++) {
-    if (num <= 1) { continue; }
-
     let isPrime = true;
+
     for (let i = 2; i < num; i++) {
         if (num % i === 0) { isPrime = false; }
     }
 
     if (!isPrime) { continue; }
+
     if (phi % num === 0) {
         factors.push(num);
 
