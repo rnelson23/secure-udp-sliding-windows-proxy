@@ -7,71 +7,117 @@ const host = '45.47.73.5';
 const port = 3000;
 
 let link = 'https://example.com';
+let encryption = 'dhke';
 let windowSize = 8;
 let verbose = false;
 
 for (const arg of process.argv.slice(2)) {
     if (arg.startsWith('http')) { link = arg; }
     if (arg === '-v') { verbose = true; }
+    if (arg === '-rsa') { encryption = 'rsa'; }
 }
 
-const prime = Number(crypto.generatePrimeSync(31, { bigint: true }));
-const secret = crypto.randomInt(3, 32);
-const factors = [];
+const powerMod = (n, e, p) => {
+    const binary = e.toString(2).slice(1);
+    let x = n;
 
-let phi = prime - 1;
-let generator;
+    for (let digit of binary) {
+        x *= x;
 
-for (let num = 2; num * num <= phi; num++) {
-    let isPrime = true;
+        if (digit === '1') {
+            x *= n;
+        }
 
-    for (let i = 2; i < num; i++) {
-        if (num % i === 0) { isPrime = false; }
+        x %= p;
     }
 
-    if (!isPrime) { continue; }
+    return x;
+};
 
-    if (phi % num === 0) {
-        factors.push(num);
+const primeFactorization = (n) => {
+    const factors = [];
 
-        while (phi % num === 0) {
-            phi /= num;
+    a: for (let f = 2n; f * f <= n; f++) {
+        for (let factor of factors) {
+            if (f % factor === 0n) {
+                continue a;
+            }
+        }
+
+        if (n % f === 0n) {
+            factors.push(f);
+
+            while (n % f === 0n) {
+                n /= f;
+            }
         }
     }
+
+    if (n > 1n) {
+        factors.push(n);
+    }
+
+    return factors;
 }
 
-if (phi > 1) { factors.push(phi); }
-
-for (let gen = 2; gen < prime; gen++) {
-    let valid = true;
-
-    for (const factor of factors) {
-        if (gen ** ((prime - 1) / factor) % prime === 1) {
-            valid = false;
-            break;
+const generateGenerator = (p, factors) => {
+    a: for (let g = 2n; g < p; g++) {
+        for (const f of factors) {
+            if (powerMod(g, (p - 1n) / f, p) === 1n) {
+                continue a;
+            }
         }
-    }
 
-    if (valid) {
-        generator = gen;
-        break;
+        return g;
     }
 }
 
-const header = Buffer.alloc(28 + Buffer.byteLength(link));
+let header = Buffer.alloc(0);
 
-header.write(link,
-    header.writeInt32BE(generator ** secret % prime,
-        header.writeInt32BE(generator,
-            header.writeInt32BE(prime,
-                header.writeInt32BE(windowSize)))));
+let secret;
+let prime;
+
+let privKey;
+
+if (encryption === 'dhke') {
+    prime = crypto.generatePrimeSync(32, {bigint: true});
+    secret = crypto.randomInt(3, (2 ** 48) - 3);
+    const generator = generateGenerator(prime, primeFactorization(prime - 1n));
+
+    header = Buffer.alloc(32 + Buffer.byteLength(link));
+
+    header.write(link,
+        header.writeBigInt64BE(powerMod(generator, secret, prime),
+            header.writeBigInt64BE(generator,
+                header.writeBigInt64BE(prime,
+                    header.writeInt32BE(1,
+                        header.writeInt32BE(windowSize))))));
+
+} else if (encryption === 'rsa') {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+    });
+
+    const pubKey = publicKey.export({ type: 'pkcs1', format: 'pem' });
+    privKey = privateKey.export({ type: 'pkcs1', format: 'pem' });
+
+    let pubKeyLength = Buffer.byteLength(pubKey);
+
+    header = Buffer.alloc(12 + pubKeyLength + Buffer.byteLength(link));
+
+    header.writeInt32BE(windowSize);
+    header.writeInt32BE(2, 4);
+    header.writeInt32BE(pubKeyLength, 8);
+    header.write(pubKey, 12);
+    header.write(link, 12 + pubKeyLength);
+}
 
 client.send(header, port, host, (err) => {
     if (err) { console.error(err); }
     console.log('\nSent request');
 });
 
-let key = Buffer.alloc(4);
+let key = Buffer.alloc(8);
 let data = Buffer.alloc(0);
 let lastPacket = windowSize;
 let lastValid = null;
@@ -84,7 +130,10 @@ client.on('message', async (msg) => {
     const seqNum = msg.readInt32BE();
 
     if (lastValid === null) {
-        key.writeInt32BE(msg.readInt32BE(4) ** secret % prime);
+        if (encryption === 'dhke') {
+            key.writeBigInt64BE(powerMod(msg.readBigInt64BE(4), secret, prime));
+        }
+
         numPackets = seqNum;
         lastValid = 0;
 
@@ -114,10 +163,20 @@ client.on('message', async (msg) => {
         if (verbose) { console.log(`   \x1b[1;94mReceived\x1b[0m ${seqNum}`); }
 
         const ack = Buffer.alloc(4);
-        const newData = msg.subarray(4);
+        let newData = msg.subarray(4);
 
-        for (let i = 0; i < newData.length; i++) {
-            newData[i] = newData[i] ^ key[i % key.length];
+        if (encryption === 'dhke') {
+            for (let i = 0; i < newData.length; i++) {
+                newData[i] = newData[i] ^ key[i % key.length];
+            }
+
+        } else if (encryption === 'rsa') {
+            newData = crypto.privateDecrypt({
+                key: privKey,
+                padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+                oaepHash: 'sha256'
+
+            }, newData);
         }
 
         lastValid++;
